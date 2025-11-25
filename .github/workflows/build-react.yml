@@ -1,0 +1,91 @@
+name: Build React to Static
+
+on:
+  push:
+    paths:
+      - 'projects/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Get project directory
+        id: project
+        run: |
+          # Find the most recently modified project directory
+          PROJECT_DIR=$(find projects -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2)
+          echo "dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "name=$(basename $PROJECT_DIR)" >> $GITHUB_OUTPUT
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          elif [ -f "yarn.lock" ]; then
+            yarn install --frozen-lockfile
+          else
+            npm install
+          fi
+          
+      - name: Build React app
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          if [ -f "package.json" ]; then
+            # Try common build commands
+            if grep -q '"build"' package.json; then
+              npm run build
+            else
+              echo "No build script found"
+              exit 1
+            fi
+          fi
+          
+      - name: Verify build output
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          if [ -d "build" ]; then
+            BUILD_DIR="build"
+          elif [ -d "dist" ]; then
+            BUILD_DIR="dist"
+          else
+            echo "Build directory not found"
+            exit 1
+          fi
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+          
+      - name: Create build archive
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          zip -r ${{ steps.project.outputs.name }}-build.zip $BUILD_DIR/
+          
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.project.outputs.name }}-static
+          path: ${{ steps.project.outputs.dir }}/${{ steps.project.outputs.name }}-build.zip
+          retention-days: 7
+          
+      - name: Notify webhook (optional)
+        if: success()
+        run: |
+          if [ ! -z "${{ secrets.WEBHOOK_URL }}" ]; then
+            curl -X POST "${{ secrets.WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "project_name": "${{ steps.project.outputs.name }}",
+                "status": "success",
+                "run_id": "${{ github.run_id }}",
+                "artifact_name": "${{ steps.project.outputs.name }}-static"
+              }'
+          fi
